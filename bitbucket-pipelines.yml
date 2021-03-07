@@ -1,0 +1,58 @@
+image: 'atlassian/default-image:2'
+pipelines:
+  branches:
+    staging:
+      - step:
+          name: Deploy to GKE STAGING
+          image: 'google/cloud-sdk:latest'
+          services:
+            - docker
+          caches:
+            - docker
+          script:
+            - apt update
+            - apt install -y jq
+            - DEPLOYMENT_FILE=deployment/deployment_dev.yml
+            - 'APP_NAME=${BITBUCKET_REPO_SLUG}-${BITBUCKET_BRANCH}'
+            - 'IMAGE_NAME=${GCLOUD_DOCKER_GCR_URL}/${GCLOUD_PROJECT_ID}/${APP_NAME}:${BITBUCKET_BUILD_NUMBER}'
+            - echo $GCLOUD_API_KEYFILE > gcloud-api-key.json
+            - gcloud auth activate-service-account --key-file gcloud-api-key.json
+            - gcloud container clusters get-credentials $GCLOUD_K8S_CLUSTER --zone=$GCLOUD_ZONE --project=$GCLOUD_PROJECT_ID
+            - 'docker login -u _json_key --password-stdin https://$GCLOUD_DOCKER_GCR_URL < gcloud-api-key.json'
+            - docker build -t $IMAGE_NAME -f deployment/Dockerfile.staging .
+            - docker push $IMAGE_NAME
+            - SVC_NAME=test-svc
+            - 'export SVC_COUNT=$(kubectl get svc -n dev5 -o json | jq "[.items[].metadata | select(.name | contains(\"$SVC_NAME\"))] | length")'
+            - echo $SVC_COUNT
+            - 'if [[ $SVC_COUNT < 1 ]]; then'
+            - '  kubectl -n dev5 patch ingress dev5-ingress --type json --patch "$(cat deployment/dev5_ingress_patch.json)"'
+            - fi
+            - 'sed -i "s|{{image_name}}|$IMAGE_NAME|g" $DEPLOYMENT_FILE'
+            - echo "$(<$DEPLOYMENT_FILE)"
+            - kubectl apply -f $DEPLOYMENT_FILE
+    prod:
+      - step:
+          name: Deploy to GKE PRODUCTION
+          image: 'google/cloud-sdk:latest'
+          services:
+            - docker
+          caches:
+            - docker
+          script:
+            - DEPLOYMENT_FILE=deployment/deployment.yml
+            - 'APP_NAME=${BITBUCKET_REPO_SLUG}-${BITBUCKET_BRANCH}'
+            - 'IMAGE_NAME=${GCLOUD_DOCKER_GCR_URL}/${GCLOUD_PROJECT_ID}/${APP_NAME}:${BITBUCKET_BUILD_NUMBER}'
+            - echo $GCLOUD_API_KEYFILE > gcloud-api-key.json
+            - gcloud auth activate-service-account --key-file gcloud-api-key.json
+            - gcloud container clusters get-credentials $GCLOUD_K8S_CLUSTER --zone=$GCLOUD_ZONE --project=$GCLOUD_PROJECT_ID
+            - 'docker login -u _json_key --password-stdin https://$GCLOUD_DOCKER_GCR_URL < gcloud-api-key.json'
+            - docker build -t $IMAGE_NAME -f deployment/Dockerfile.prod .
+            - 'curl -X POST "https://api.health-check.digitop.vn/api/v1/jobs/links" -H  "Content-Type:application/json" -d "{\"name\":\"test\",\"link\":\"https://undefined\"}"'
+            - docker push $IMAGE_NAME
+            - 'sed -i "s|{{image_name}}|$IMAGE_NAME|g" $DEPLOYMENT_FILE'
+            - echo "$(<$DEPLOYMENT_FILE)"
+            - kubectl apply -f $DEPLOYMENT_FILE
+definitions:
+  services:
+    docker:
+      memory: 3072
